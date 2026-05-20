@@ -36,3 +36,17 @@ export interface PortfolioItem {
   gainLoss?: number;
   gainLossRate?: number;
 }
+
+export interface RealizedSaleItem {
+  id: string;
+  ticker: string;
+  companyName: string;
+  averagePrice: number;
+  sellPrice: number;
+  quantity: number;
+  totalSellAmount: number;
+  realizedProfitLoss: number;
+  returnRate: number;
+  date: Date;
+}
+

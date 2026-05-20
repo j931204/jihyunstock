@@ -1,0 +1,44 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "Stores user total deposits and cash balance.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "totalDeposits": { "type": "number", "description": "Total amount deposited by user." },
+        "cashBalance": { "type": "number", "description": "Current available cash (예수금)." },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "totalDeposits", "cashBalance"]
+    },
+    "Trade": {
+      "title": "Stock Trade",
+      "description": "Records individual buy or sell transactions.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "ticker": { "type": "string" },
+        "companyName": { "type": "string" },
+        "type": { "type": "string", "enum": ["BUY", "SELL"] },
+        "quantity": { "type": "number" },
+        "price": { "type": "number" },
+        "date": { "type": "string", "format": "date-time" },
+        "reason": { "type": "string", "description": "Reason for trade, max 500 chars." },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "ticker", "type", "quantity", "price", "date"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile and balance settings."
+    },
+    "/trades/{tradeId}": {
+      "schema": "Trade",
+      "description": "Individual trade records."
+    }
+  }
+}

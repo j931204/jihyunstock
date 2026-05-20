@@ -1,0 +1,13 @@
+@import url('https://fonts.googleapis.com/css2?family=Nanum+Gothic:wght@400;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Nanum Gothic", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Nanum Gothic", ui-monospace, SFMono-Regular, monospace;
+}
+
+body {
+  background-color: #F1F5F9;
+  font-family: "Nanum Gothic", sans-serif;
+}
+

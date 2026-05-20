@@ -8,6 +8,7 @@ import {
   setDoc, 
   doc, 
   getDoc,
+  getDocs,
   orderBy,
   Timestamp,
   deleteDoc
@@ -55,7 +56,11 @@ export default function App() {
   const [showAddForm, setShowAddForm] = useState(false);
   const [editingTrade, setEditingTrade] = useState<Trade | null>(null);
   const [selectedDate, setSelectedDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [salesStartDate, setSalesStartDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [salesEndDate, setSalesEndDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [marketData, setMarketData] = useState({ kospi: 0, kosdaq: 0, kospiChange: 0, kosdaqChange: 0 });
+  const [inputPassword, setInputPassword] = useState('');
+  const [saveStatus, setSaveStatus] = useState<{ type: 'idle' | 'loading' | 'success' | 'error'; message?: string }>({ type: 'idle' });
 
   // Market indices sync
   useEffect(() => {
@@ -76,7 +81,7 @@ export default function App() {
     
     for (const item of portfolio) {
       if (force || !prices[item.ticker]) {
-        const price = await fetchCurrentPrice(item.ticker, item.companyName);
+        const price = await fetchCurrentPrice(item.ticker, item.companyName, item.averagePrice);
         prices[item.ticker] = price;
       }
     }
@@ -85,40 +90,45 @@ export default function App() {
     setIsPriceLoading(false);
   };
 
-  // Profile and Trades Listener (Auth checking removed)
+  // Load profile and trades once on mount
   useEffect(() => {
+    const loadInitialData = async () => {
+      try {
+        const profileRef = doc(db, 'users', user.uid);
+        const profileSnap = await getDoc(profileRef);
+        
+        let initialProfile: UserProfile;
+        if (profileSnap.exists()) {
+          initialProfile = profileSnap.data() as UserProfile;
+          setProfile(initialProfile);
+        } else {
+          initialProfile = {
+            userId: user.uid,
+            displayName: user.displayName || 'User',
+            totalDeposits: 0,
+            cashBalance: 0,
+            updatedAt: Timestamp.now()
+          };
+          await setDoc(profileRef, initialProfile);
+          setProfile(initialProfile);
+        }
 
-    const profileRef = doc(db, 'users', user.uid);
-    const unsubProfile = onSnapshot(profileRef, (docSnap) => {
-      if (docSnap.exists()) {
-        setProfile(docSnap.data() as UserProfile);
-      } else {
-        const initialProfile: UserProfile = {
-          userId: user.uid,
-          displayName: user.displayName || 'User',
-          totalDeposits: 0,
-          cashBalance: 0,
-          updatedAt: Timestamp.now()
-        };
-        setDoc(profileRef, initialProfile);
+        const tradesQuery = query(
+          collection(db, 'trades'), 
+          where('userId', '==', user.uid),
+          orderBy('date', 'desc')
+        );
+        const tradesSnapshot = await getDocs(tradesQuery);
+        const docs = tradesSnapshot.docs.map(d => ({ id: d.id, ...d.data() } as Trade));
+        setTrades(docs);
+      } catch (e) {
+        console.error("Error loading initial data from Firestore:", e);
+      } finally {
+        setLoading(false);
       }
-    });
-
-    const tradesQuery = query(
-      collection(db, 'trades'), 
-      where('userId', '==', user.uid),
-      orderBy('date', 'desc')
-    );
-    const unsubTrades = onSnapshot(tradesQuery, (snapshot) => {
-      const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Trade));
-      setTrades(docs);
-      setLoading(false);
-    });
-
-    return () => {
-      unsubProfile();
-      unsubTrades();
     };
+
+    loadInitialData();
   }, [user]);
 
   // Aggregate Portfolio
@@ -171,23 +181,22 @@ export default function App() {
     const map = new Map<string, { quantity: number; averagePrice: number }>();
     const sales: RealizedSaleItem[] = [];
 
-    // Filter trades by selected date
-    const filteredTrades = trades.filter(t => {
-      const tradeDate = t.date instanceof Timestamp ? t.date.toDate() : new Date(t.date);
-      const limitDate = new Date(selectedDate);
-      limitDate.setHours(23, 59, 59, 999);
-      return tradeDate <= limitDate;
-    });
-
     // Process trades chronologically to compute holding average cost at the moment of each sale
-    const sortedTrades = [...filteredTrades].sort((a, b) => {
+    const sortedTrades = [...trades].sort((a, b) => {
       const dateA = a.date instanceof Timestamp ? a.date.toMillis() : new Date(a.date).getTime();
       const dateB = b.date instanceof Timestamp ? b.date.toMillis() : new Date(b.date).getTime();
       return dateA - dateB;
     });
 
+    // Parse start and end date limits
+    const startLimit = new Date(salesStartDate);
+    startLimit.setHours(0, 0, 0, 0);
+    const endLimit = new Date(salesEndDate);
+    endLimit.setHours(23, 59, 59, 999);
+
     sortedTrades.forEach(t => {
       const existing = map.get(t.ticker) || { quantity: 0, averagePrice: 0 };
+      const tradeDate = t.date instanceof Timestamp ? t.date.toDate() : new Date(t.date);
 
       if (t.type === TradeType.BUY) {
         const newQuantity = existing.quantity + t.quantity;
@@ -201,20 +210,22 @@ export default function App() {
         const totalSellAmount = t.price * t.quantity;
         const realizedProfitLoss = (t.price - avgPrice) * t.quantity;
         const returnRate = avgPrice > 0 ? ((t.price - avgPrice) / avgPrice) * 100 : 0;
-        const date = t.date instanceof Timestamp ? t.date.toDate() : new Date(t.date);
 
-        sales.push({
-          id: t.id || Math.random().toString(),
-          ticker: t.ticker,
-          companyName: t.companyName,
-          averagePrice: avgPrice,
-          sellPrice: t.price,
-          quantity: t.quantity,
-          totalSellAmount,
-          realizedProfitLoss,
-          returnRate,
-          date
-        });
+        // Check if the sale date is within the selected range
+        if (tradeDate >= startLimit && tradeDate <= endLimit) {
+          sales.push({
+            id: t.id || Math.random().toString(),
+            ticker: t.ticker,
+            companyName: t.companyName,
+            averagePrice: avgPrice,
+            sellPrice: t.price,
+            quantity: t.quantity,
+            totalSellAmount,
+            realizedProfitLoss,
+            returnRate,
+            date: tradeDate
+          });
+        }
 
         // Reduce holding quantity, keep average cost same
         const newQuantity = Math.max(0, existing.quantity - t.quantity);
@@ -225,7 +236,7 @@ export default function App() {
 
     // Sort by sale date, newest first
     return sales.sort((a, b) => b.date.getTime() - a.date.getTime());
-  }, [trades, selectedDate]);
+  }, [trades, salesStartDate, salesEndDate]);
 
   // Sync current prices on portfolio change
   useEffect(() => {
@@ -256,80 +267,145 @@ export default function App() {
     };
   }, [portfolio, currentPrices, profile]);
 
-  const handleUpdateBalances = async (deposits: number, cash: number) => {
-    if (!user) return;
-    const profileRef = doc(db, 'users', user.uid);
-    await setDoc(profileRef, {
-      userId: user.uid,
+  const handleUpdateBalances = (deposits: number, cash: number) => {
+    if (!profile) return;
+    setProfile({
+      ...profile,
       totalDeposits: deposits,
       cashBalance: cash,
       updatedAt: Timestamp.now()
-    }, { merge: true });
+    });
   };
 
-  const handleAddTrade = async (trade: Partial<Trade>) => {
-    if (!user) return;
-    try {
-      if (editingTrade?.id) {
-        // Revert old trade impact first
-        if (profile) {
-          const oldAmount = editingTrade.quantity * editingTrade.price;
-          const revertedCash = editingTrade.type === TradeType.BUY 
-            ? profile.cashBalance + oldAmount 
-            : profile.cashBalance - oldAmount;
-          
-          const newAmount = (trade.quantity || 0) * (trade.price || 0);
-          const finalCash = trade.type === TradeType.BUY 
-            ? revertedCash - newAmount 
-            : revertedCash + newAmount;
-          
-          await handleUpdateBalances(profile.totalDeposits, finalCash);
-        }
+  const handleAddTrade = (trade: Partial<Trade>) => {
+    if (!profile) return;
 
-        await setDoc(doc(db, 'trades', editingTrade.id), {
-          ...trade,
-          userId: user.uid,
-          updatedAt: Timestamp.now()
-        }, { merge: true });
-        setEditingTrade(null);
-      } else {
-        await addDoc(collection(db, 'trades'), {
-          ...trade,
-          userId: user.uid,
-          createdAt: Timestamp.now()
-        });
-        
-        // Update cash balance if it was a BUY or SELL
-        if (profile) {
-          const amount = (trade.quantity || 0) * (trade.price || 0);
-          const newCash = trade.type === TradeType.BUY 
-            ? profile.cashBalance - amount 
-            : profile.cashBalance + amount;
-          
-          await handleUpdateBalances(profile.totalDeposits, newCash);
-        }
-      }
-      setShowAddForm(false);
-    } catch (e) {
-      console.error(e);
-      alert("매매 기록 저장 중 오류가 발생했습니다.");
+    if (editingTrade?.id) {
+      // Revert old trade impact first
+      const oldAmount = editingTrade.quantity * editingTrade.price;
+      const revertedCash = editingTrade.type === TradeType.BUY 
+        ? profile.cashBalance + oldAmount 
+        : profile.cashBalance - oldAmount;
+      
+      const newAmount = (trade.quantity || 0) * (trade.price || 0);
+      const finalCash = trade.type === TradeType.BUY 
+        ? revertedCash - newAmount 
+        : revertedCash + newAmount;
+      
+      setProfile({
+        ...profile,
+        cashBalance: finalCash,
+        updatedAt: Timestamp.now()
+      });
+
+      setTrades(prev => prev.map(t => t.id === editingTrade.id ? {
+        ...t,
+        ...trade,
+        updatedAt: Timestamp.now()
+      } as Trade : t));
+      setEditingTrade(null);
+    } else {
+      // Doc ID generator client-side
+      const newTradeId = doc(collection(db, 'trades')).id;
+      const newTrade: Trade = {
+        ...trade,
+        id: newTradeId,
+        userId: user.uid,
+        createdAt: Timestamp.now()
+      } as Trade;
+
+      setTrades(prev => [newTrade, ...prev]);
+      
+      // Update cash balance if it was a BUY or SELL
+      const amount = (trade.quantity || 0) * (trade.price || 0);
+      const newCash = trade.type === TradeType.BUY 
+        ? profile.cashBalance - amount 
+        : profile.cashBalance + amount;
+      
+      setProfile({
+        ...profile,
+        cashBalance: newCash,
+        updatedAt: Timestamp.now()
+      });
     }
+    setShowAddForm(false);
   };
 
-  const handleDeleteTrade = async (id: string, trade: Trade) => {
+  const handleDeleteTrade = (id: string, trade: Trade) => {
     if (!confirm("이 기록을 삭제하시겠습니까?")) return;
+    if (!profile) return;
+
+    setTrades(prev => prev.filter(t => t.id !== id));
+
+    // Revert cash balance
+    const amount = (trade.quantity || 0) * (trade.price || 0);
+    const newCash = trade.type === TradeType.BUY 
+      ? profile.cashBalance + amount 
+      : profile.cashBalance - amount;
+
+    setProfile({
+      ...profile,
+      cashBalance: newCash,
+      updatedAt: Timestamp.now()
+    });
+  };
+
+  const handleSaveToServer = async () => {
+    if (inputPassword !== '1121') {
+      setSaveStatus({ type: 'error', message: '비밀번호가 올바르지 않습니다.' });
+      return;
+    }
+
+    setSaveStatus({ type: 'loading' });
+
     try {
-      await deleteDoc(doc(db, 'trades', id));
-      // Revert cash balance
+      // 1. Save local user profile
       if (profile) {
-        const amount = (trade.quantity || 0) * (trade.price || 0);
-        const newCash = trade.type === TradeType.BUY 
-          ? profile.cashBalance + amount 
-          : profile.cashBalance - amount;
-        await handleUpdateBalances(profile.totalDeposits, newCash);
+        const profileRef = doc(db, 'users', user.uid);
+        await setDoc(profileRef, {
+          ...profile,
+          updatedAt: Timestamp.now()
+        });
       }
-    } catch (e) {
-      console.error(e);
+
+      // 2. Fetch remote trade IDs to recognize deletions
+      const tradesQuery = query(
+        collection(db, 'trades'), 
+        where('userId', '==', user.uid)
+      );
+      const remoteTradesSnapshot = await getDocs(tradesQuery);
+      const remoteTradeIds = remoteTradesSnapshot.docs.map(d => d.id);
+
+      // 3. Find deleted trade IDs
+      const currentTradeIds = new Set(trades.map(t => t.id));
+      const deletedIds = remoteTradeIds.filter(id => !currentTradeIds.has(id));
+
+      // 4. Perform deletes
+      for (const deleteId of deletedIds) {
+        await deleteDoc(doc(db, 'trades', deleteId));
+      }
+
+      // 5. Save all current local trades (both updated and newly added)
+      for (const trade of trades) {
+        const tradeRef = doc(db, 'trades', trade.id);
+        const { id, ...dataToSave } = trade; // setDoc without the nested metadata ID if preferred, but keeping ID is fine
+        await setDoc(tradeRef, {
+          id,
+          ...dataToSave
+        }, { merge: true });
+      }
+
+      setSaveStatus({ type: 'success', message: '데이터가 완벽하게 서버에 저장되었습니다! 어디서든 이 링크로 접속하면 현재 상태가 그대로 복구됩니다.' });
+      setInputPassword(''); // clear input password
+      
+      // Auto-hide success message after 5 seconds
+      setTimeout(() => {
+        setSaveStatus(prev => prev.type === 'success' ? { type: 'idle' } : prev);
+      }, 5000);
+
+    } catch (error) {
+      console.error('Error saving data to Firestore:', error);
+      setSaveStatus({ type: 'error', message: '데이터 저장 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.' });
     }
   };
 
@@ -526,25 +602,47 @@ export default function App() {
           <div className="p-4 border-b bg-slate-50 flex flex-wrap gap-4 justify-between items-center">
             <div className="flex items-center gap-4">
               <h3 className="font-bold text-sm text-slate-700 uppercase tracking-tight">매도 종목 현황</h3>
-              <div className="flex items-center bg-slate-100 p-1 rounded-lg border border-slate-200">
-                <Clock size={14} className="text-slate-400 ml-2" />
-                <input 
-                  type="date" 
-                  value={selectedDate}
-                  onChange={(e) => setSelectedDate(e.target.value)}
-                  className="bg-transparent border-none text-xs font-bold text-slate-600 focus:ring-0 px-2 cursor-pointer"
-                />
-                <button 
-                  onClick={() => setSelectedDate(new Date().toISOString().split('T')[0])}
-                  className={cn(
-                    "text-[10px] px-2 py-1 rounded transition-all",
-                    selectedDate === new Date().toISOString().split('T')[0] 
-                      ? "bg-white text-[#004751] shadow-sm font-bold" 
-                      : "text-slate-400 hover:text-slate-600"
-                  )}
-                >
-                  오늘
-                </button>
+              <div className="flex flex-wrap items-center bg-slate-100 p-1.5 rounded-lg border border-slate-200 gap-2">
+                <Clock size={14} className="text-slate-400 ml-1" />
+                <div className="flex items-center gap-1">
+                  <input 
+                    type="date" 
+                    value={salesStartDate}
+                    onChange={(e) => setSalesStartDate(e.target.value)}
+                    className="bg-transparent border-none text-xs font-bold text-slate-600 focus:ring-0 px-1 py-0 cursor-pointer w-[120px]"
+                  />
+                  <button 
+                    onClick={() => setSalesStartDate(new Date().toISOString().split('T')[0])}
+                    className={cn(
+                      "text-[10px] px-1.5 py-0.5 rounded transition-all font-semibold",
+                      salesStartDate === new Date().toISOString().split('T')[0] 
+                        ? "bg-white text-[#004751] shadow-sm font-bold" 
+                        : "text-slate-400 hover:text-slate-600 bg-slate-200/50"
+                    )}
+                  >
+                    오늘
+                  </button>
+                </div>
+                <span className="text-xs text-slate-400 font-bold">~</span>
+                <div className="flex items-center gap-1">
+                  <input 
+                    type="date" 
+                    value={salesEndDate}
+                    onChange={(e) => setSalesEndDate(e.target.value)}
+                    className="bg-transparent border-none text-xs font-bold text-slate-600 focus:ring-0 px-1 py-0 cursor-pointer w-[120px]"
+                  />
+                  <button 
+                    onClick={() => setSalesEndDate(new Date().toISOString().split('T')[0])}
+                    className={cn(
+                      "text-[10px] px-1.5 py-0.5 rounded transition-all font-semibold",
+                      salesEndDate === new Date().toISOString().split('T')[0] 
+                        ? "bg-white text-[#004751] shadow-sm font-bold" 
+                        : "text-slate-400 hover:text-slate-600 bg-slate-200/50"
+                    )}
+                  >
+                    오늘
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -572,6 +670,46 @@ export default function App() {
               </tbody>
             </table>
           </div>
+        </section>
+
+        {/* 서버 데이터 저장 관리 (Admin 데이터 동기화) */}
+        <section className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden shrink-0 p-6">
+          <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+            <div>
+              <h3 className="font-bold text-sm text-slate-700 uppercase tracking-tight mb-1">데이터 영구 보관 (서버 백업)</h3>
+            </div>
+            <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
+              <div className="relative flex-1 md:flex-initial">
+                <input 
+                  type="password" 
+                  placeholder="비밀번호 입력" 
+                  value={inputPassword}
+                  onChange={(e) => setInputPassword(e.target.value)}
+                  className="w-full md:w-[200px] border border-slate-200 rounded-lg text-xs p-3 bg-slate-50 focus:ring-1 focus:ring-[#758c64] outline-none font-mono"
+                />
+              </div>
+              <button 
+                onClick={handleSaveToServer}
+                disabled={saveStatus.type === 'loading'}
+                className="bg-[#758c64] hover:bg-[#758c64]/90 disabled:opacity-50 text-white font-bold py-3 px-8 rounded-lg text-xs shadow-md hover:translate-y-[-1px] transition-all flex items-center justify-center gap-2 whitespace-nowrap"
+              >
+                {saveStatus.type === 'loading' && <Loader2 size={12} className="animate-spin" />}
+                클라우드 서버 저장
+              </button>
+            </div>
+          </div>
+          
+          {saveStatus.type !== 'idle' && (
+            <div className={cn(
+              "mt-4 p-3 rounded-lg text-xs font-semibold flex items-center gap-2 border",
+              saveStatus.type === 'success' && "bg-emerald-50 border-emerald-200 text-emerald-800",
+              saveStatus.type === 'error' && "bg-rose-50 border-rose-200 text-rose-800",
+              saveStatus.type === 'loading' && "bg-slate-50 border-slate-200 text-slate-600 animate-pulse"
+            )}>
+              <AlertCircle size={14} className={cn(saveStatus.type === 'loading' && "animate-spin")} />
+              <span>{saveStatus.message || (saveStatus.type === 'loading' && "서버에 세션 동기화 및 업로드 진행 중...")}</span>
+            </div>
+          )}
         </section>
       </main>
 
